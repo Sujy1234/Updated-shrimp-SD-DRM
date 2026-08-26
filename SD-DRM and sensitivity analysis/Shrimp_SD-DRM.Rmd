@@ -69,9 +69,9 @@ relationship. Emax is converted from log10 per hour to natural-log per day,
 which is the scale used by the SD-DRM.
 
 ```{r pd-uncertainty}
-pd_estimates <- c(Emax_log10_h = 1.476379, EC50_mg_L = 0.1668759)
+pd_estimates <- c(Emax_log10_h = 1.476380, EC50_mg_L = 0.166877)
 
-pd_covariance <- matrix(c(0.01068527, 0.00224653, 0.00224653, 0.00210130), nrow = 2, byrow = TRUE)
+pd_covariance <- matrix(c(0.010685300, 0.002246552, 0.002246552, 0.002101326), nrow = 2, byrow = TRUE)
 
 draw_pd <- function(n) {
   x <- MASS::mvrnorm(n, pd_estimates, pd_covariance)
