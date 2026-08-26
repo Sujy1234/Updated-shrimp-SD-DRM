@@ -387,8 +387,8 @@ parameters</h1>
 their effects can be evaluated separately by PAWN. Positive values are
 retained, and <span class="math inline">\(E_{max}\)</span> is converted
 from log10 per hour to natural-log per day for the SD-DRM.</p>
-<pre class="r"><code>Emax_mean &lt;- 1.476379; Emax_sd &lt;- sqrt(0.01068527)
-EC50_mean &lt;- 0.1668759; EC50_sd &lt;- sqrt(0.00210130)
+<pre class="r"><code>Emax_mean &lt;- 1.476380; Emax_sd &lt;- 0.10336972
+EC50_mean &lt;- 0.166877; EC50_sd &lt;- 0.04584022
 
 rposnorm &lt;- function(N, mean, sd) {
   x &lt;- rnorm(N, mean, sd)
