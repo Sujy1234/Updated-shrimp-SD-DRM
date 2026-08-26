@@ -14,28 +14,6 @@ The analysis combines:
   fraction; and
 - PAWN global sensitivity analysis.
 
-## Repository structure
-
-```text
-Updated-shrimp-SD-DRM/
-├── Identification of distribution of M/
-│   ├── Distribution_fit.R
-│   └── shrimp_consumption_days.csv
-├── Final emax model-doxycycline/
-│   ├── Antibiotic data with control.csv
-│   ├── Emax code.R
-│   ├── Fitting time kill data into PD model.pdf
-│   └── Paper with time kill data.pdf
-├── Exposure assessment code/
-│   ├── Exposure assessment.R
-│   └── raw_shrimp_mc2d_simulation_data.csv
-└── SD-DRM and sensitivity analysis/
-    ├── model_functions.R
-    ├── raw_shrimp_mc2d_simulation_data.csv
-    ├── Shrimp_SD-DRM.Rmd
-    └── Sensitivity analysis.Rmd
-```
-
 ## Model overview
 
 ### Exposure assessment
