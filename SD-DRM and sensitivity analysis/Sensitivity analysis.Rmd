@@ -1,0 +1,292 @@
+---
+title: "PAWN Sensitivity Analysis"
+author: "Sumit Jyoti"
+date: "2026-08-22"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+rm(list = ls())
+source("model_functions.R")
+```
+
+# Model parameters
+
+```{r model-parameters}
+alpha <- 0.60; beta <- 1.31e6; tfs <- 1; MIC <- 0.13
+fr_min <- 0; fr_max <- 0.5; pMIC_min <- 0; pMIC_max <- 10
+C_min <- 75; C_max <- 1100
+M_shape <- 0.8760928; M_scale <- 43.276368
+F_min <- 0.0018; F_max <- 0.0233
+
+n <- 15; Nu <- 100; Nc <- 100
+pawn_seed <- 0; ncores <- 4
+critval <- 1.36 * sqrt((Nu + Nc) / (Nu * Nc))
+```
+
+# Pharmacodynamic parameters
+
+$E_{max}$ and $EC_{50}$ are sampled independently so that their effects can be
+evaluated separately by PAWN. Positive values are retained, and $E_{max}$ is
+converted from log10 per hour to natural-log per day for the SD-DRM.
+
+```{r pd-parameters}
+Emax_mean <- 1.476379; Emax_sd <- sqrt(0.01068527)
+EC50_mean <- 0.1668759; EC50_sd <- sqrt(0.00210130)
+
+rposnorm <- function(N, mean, sd) {
+  x <- rnorm(N, mean, sd)
+  while (any(x <= 0)) x[x <= 0] <- rnorm(sum(x <= 0), mean, sd)
+  x
+}
+
+sample_Emax <- function(N) rposnorm(N, Emax_mean, Emax_sd) * 24 * log(10)
+sample_EC50 <- function(N) rposnorm(N, EC50_mean, EC50_sd)
+```
+
+# PAWN functions
+
+PAWN measures sensitivity using the maximum distance between the unconditional
+output distribution and output distributions obtained by conditioning each
+input. The SD-DRM lookup table is generated once from the sampled
+pharmacodynamic range and reused for all model evaluations.
+
+```{r pawn-functions}
+evaluate_model <- function(data, model, ab_lookup, ncores = 1) {
+  f <- function(i) model(data[i, , drop = FALSE], ab_lookup)
+
+  if (ncores > 1 && .Platform$OS.type != "windows") {
+    unlist(parallel::mclapply(
+      seq_len(nrow(data)), f,
+      mc.cores = ncores,
+      mc.set.seed = FALSE
+    ))
+  } else {
+    vapply(seq_len(nrow(data)), f, numeric(1))
+  }
+}
+
+PAWN <- function(model, input_names, sample_inputs, Nu = 100, n = 15,
+                 Nc = 100, seed = 0, ncores = 1) {
+  set.seed(seed)
+  M <- length(input_names)
+  par_u <- sample_inputs(Nu)
+  par_c <- sample_inputs(M * n * Nc)
+
+  for (j in seq_len(M)) {
+    for (i in seq_len(n)) {
+      idx <- ((j - 1) * n * Nc + (i - 1) * Nc + 1):
+        ((j - 1) * n * Nc + i * Nc)
+
+      par_c[idx, input_names[j]] <-
+        sample_inputs(1)[[input_names[j]]][1]
+    }
+  }
+
+  all_inputs <- rbind(par_u, par_c)
+
+  ab_lookup <- make_ab_lookup(
+    alpha, beta,
+    all_inputs$Emax,
+    all_inputs$EC50,
+    max(all_inputs$pMIC) / 100 * MIC,
+    tfs,
+    n_grid = 250,
+    seed = seed,
+    nsim = 1000
+  )
+
+  y_u <- evaluate_model(par_u, model, ab_lookup, ncores)
+  y_c <- evaluate_model(par_c, model, ab_lookup, ncores)
+  KS <- matrix(NA_real_, M, n, dimnames = list(input_names, NULL))
+
+  for (j in seq_len(M)) {
+    for (i in seq_len(n)) {
+      idx <- ((j - 1) * n * Nc + (i - 1) * Nc + 1):
+        ((j - 1) * n * Nc + i * Nc)
+
+      KS[j, i] <- unname(suppressWarnings(
+        ks.test(y_u, y_c[idx], exact = FALSE)$statistic
+      ))
+    }
+  }
+
+  list(KS = KS)
+}
+```
+
+# SD-DRM sensitivity model
+
+Retail concentration, serving mass, and pathogenic fraction represent
+variability only. The resulting PAWN indices therefore describe the influence
+of the complete exposure-input distributions.
+
+```{r sensitivity-model}
+rlogunif <- function(N, min, max) {
+  exp(runif(N, log(min), log(max)))
+}
+
+sample_inputs <- function(N) {
+  data.frame(
+    C_retail = rlogunif(N, C_min, C_max),
+    M = rgamma(N, shape = M_shape, scale = M_scale),
+    F_pathogenic = runif(N, F_min, F_max),
+    fr = runif(N, fr_min, fr_max),
+    pMIC = runif(N, pMIC_min, pMIC_max),
+    Emax = sample_Emax(N),
+    EC50 = sample_EC50(N)
+  )
+}
+
+risk_model <- function(x, ab_lookup) {
+  dose <- x$C_retail * x$M * x$F_pathogenic
+
+  calc_sd_drm(
+    dose,
+    x$fr,
+    x$pMIC / 100 * MIC,
+    alpha,
+    beta,
+    x$Emax,
+    x$EC50,
+    tfs,
+    ab_lookup
+  )$risk_total[1]
+}
+
+input_names <- c(
+  "C_retail", "M", "F_pathogenic",
+  "fr", "pMIC", "Emax", "EC50"
+)
+
+res <- PAWN(
+  risk_model,
+  input_names,
+  sample_inputs,
+  Nu,
+  n,
+  Nc,
+  pawn_seed,
+  ncores
+)
+```
+
+# Sensitivity results and figure
+
+The PAWN index is the Kolmogorov-Smirnov distance between unconditional and
+conditional output distributions. Higher values indicate a stronger influence
+on illness risk. The dashed line is a descriptive two-sample KS reference
+threshold, not a formal classification rule.
+
+```{r pawn-summary}
+median_pawn <- apply(res$KS, 1, median)
+
+summary_pawn <- data.frame(
+  Parameter = c(
+    "C_retail", "M", "F_pathogenic",
+    "f_r", "pMIC", "Emax", "EC50"
+  ),
+  Rank = rank(-median_pawn, ties.method = "min"),
+  Median_PAWN = median_pawn,
+  Min_PAWN = apply(res$KS, 1, min),
+  Max_PAWN = apply(res$KS, 1, max),
+  Median_vs_threshold = ifelse(
+    median_pawn > critval,
+    "Median above threshold",
+    "Median below threshold"
+  )
+)
+
+summary_pawn <- summary_pawn[order(summary_pawn$Rank), ]
+
+knitr::kable(
+  summary_pawn,
+  digits = 3,
+  caption = "PAWN sensitivity indices"
+)
+```
+
+```{r pawn-figure, fig.width=8.5, fig.height=5, dpi=600, fig.path="images/PAWN_"}
+plot_pawn <- function(res, labels) {
+  ord <- order(apply(res$KS, 1, median), decreasing = TRUE)
+  KS <- res$KS[ord, , drop = FALSE]
+  labels <- labels[ord]
+
+  boxplot(
+    t(KS),
+    ylim = c(0, 1),
+    outline = FALSE,
+    xaxt = "n",
+    xlab = "",
+    ylab = "PAWN index",
+    cex.axis = 1.1,
+    cex.lab = 1.2
+  )
+
+  axis(1, at = seq_along(labels), labels = FALSE)
+
+  text(
+    seq_along(labels),
+    -0.09,
+    labels,
+    srt = 40,
+    adj = 1,
+    xpd = TRUE,
+    cex = 0.95
+  )
+
+  points(
+    jitter(rep(seq_along(labels), n), factor = 1.5),
+    as.vector(KS),
+    pch = 21,
+    bg = "grey70"
+  )
+
+  abline(h = critval, lty = 2)
+}
+
+labels <- expression(
+  C[retail], M, F[pathogenic],
+  f[r], "pMIC", E[max], EC[50]
+)
+
+set.seed(pawn_seed)
+par(mar = c(5.5, 4.2, 1, 1))
+plot_pawn(res, labels)
+```
+
+# Analysis settings
+
+```{r analysis-settings}
+settings <- data.frame(
+  Setting = c(
+    "Conditioning values",
+    "Unconditional samples",
+    "Conditional samples",
+    "KS reference value",
+    "Exposure inputs",
+    "Emax-EC50 dependence"
+  ),
+  Value = c(
+    n,
+    Nu,
+    Nc,
+    round(critval, 4),
+    paste(
+      "C_retail, M, and F_pathogenic:",
+      "variability only"
+    ),
+    "Independent"
+  )
+)
+
+knitr::kable(
+  settings,
+  caption = "PAWN sensitivity analysis settings"
+)
+```
