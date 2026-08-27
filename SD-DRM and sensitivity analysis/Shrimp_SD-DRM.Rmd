@@ -176,7 +176,7 @@ find_cutoff <- function(data, vary_by, fixed_fr = NULL, fixed_pMIC = NULL,
 }
 ```
 
-# Conditional dose-response curves
+# Dose-response curves
 
 These curves use a fixed dose grid, so they show dose-response uncertainty from
 the paired Emax-EC50 draws without exposure variability. Dose and illness
@@ -211,17 +211,17 @@ run_dose_grid <- function(fr, pMIC) {
 make_dose_response <- function(vary_by, values, panel_values) {
   expand_grid(panel_value = panel_values, value = values) |>
     pmap_dfr(function(panel_value, value) {
-      if (vary_by == "pMIC") {
-        pMIC <- value
-        fr <- panel_value
-        panel <- paste0("Resistant fraction = ", panel_value)
-        group <- paste0(value, "% MIC")
-      } else {
-        fr <- value
-        pMIC <- panel_value
-        panel <- paste0("pMIC = ", panel_value, "% MIC")
-        group <- paste0("fr = ", value)
-      }
+    if (vary_by == "pMIC") {
+  pMIC <- value
+  fr <- panel_value
+  panel <- paste0("Resistant fraction (fᵣ) = ", panel_value)
+  group <- paste0(value, "% MIC")
+} else {
+  fr <- value
+  pMIC <- panel_value
+  panel <- paste0("pMIC = ", panel_value, "% MIC")
+  group <- paste0("fr = ", value)
+}
 
       out <- run_dose_grid(fr, pMIC)
       q <- apply(out$risk, 2, quantile, probs = c(0.025, 0.50, 0.975), names = FALSE)
@@ -525,7 +525,7 @@ format_cutoff <- function(cutoff, digits, suffix = "") {
 plot_A <- plot_expected_risk(
   risk_summary_pMIC_fr0_plot,
   panel_label = "A",
-  fixed_text = "Resistant fraction fixed at 0",
+  fixed_text = "Resistant fraction (fᵣ) fixed at 0",
   x_title = "Residual doxycycline concentration (pMIC)",
   x_breaks = pMIC_breaks,
   cutoff = cutoff_pMIC_fr0,
@@ -547,7 +547,7 @@ plot_B <- plot_expected_risk(
 plot_C <- plot_expected_risk(
   risk_summary_pMIC_plot,
   panel_label = "C",
-  fixed_text = paste0("Resistant fraction fixed at ", fr_fixed),
+  fixed_text = paste0("Resistant fraction (fᵣ) fixed at ", fr_fixed),
   x_title = "Residual doxycycline concentration (pMIC)",
   x_breaks = pMIC_breaks,
   cutoff = cutoff_pMIC,
@@ -599,7 +599,7 @@ expected_risk_four_panel <- patchwork::wrap_plots(
   guides = "collect"
 ) +
   patchwork::plot_annotation(
-    title = "Expected illness risk under antibiotic and resistance scenarios",
+    title = "Illness risk under antibiotic and resistance scenarios",
     caption = paste(
       "Lines show log10-transformed median expected risk; ribbons show the",
       "corresponding 95% intervals from exposure and dose-response uncertainty."
