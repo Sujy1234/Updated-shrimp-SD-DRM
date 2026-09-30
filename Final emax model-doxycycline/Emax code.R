@@ -39,7 +39,21 @@ emax_model <- nls(
 
 summary(emax_model)
 
-# Emax and EC50 estimates with SD
+# Convert Emax to day^-1 and calculate SD
+pd_estimates <- coef(emax_model)[c("Emax", "EC50")]
+pd_covariance <- vcov(emax_model)[c("Emax", "EC50"),
+                                  c("Emax", "EC50")]
+
+conversion <- c(24 * log(10), 1)
+
+pd_estimates <- pd_estimates * conversion
+pd_covariance <- diag(conversion) %*% pd_covariance %*% diag(conversion)
+
+dimnames(pd_covariance) <- list(
+  c("Emax", "EC50"),
+  c("Emax", "EC50")
+)
+
 pd_sd <- sqrt(diag(pd_covariance))
 pd_estimates_with_sd <- cbind(Estimate = pd_estimates, SD = pd_sd)
 
