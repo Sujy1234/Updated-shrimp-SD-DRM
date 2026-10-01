@@ -1,7 +1,7 @@
 ---
-title: "PAWN Sensitivity Analysis"
+title: "Two-Dimensional PAWN Sensitivity Analysis"
 author: "Sumit Jyoti"
-date: "2026-08-22"
+date: "2026-09-08"
 output:
   html_document:
     toc: true
@@ -12,32 +12,46 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 rm(list = ls())
+library(dplyr); library(purrr); library(ggplot2)
 source("model_functions.R")
 ```
 
-# Model parameters
+# Model parameters and analysis settings
+
+The sensitivity analysis retains the two-dimensional structure of the main
+SD-DRM. The inner computational layer contains the three exposure-variability
+inputs and the two scenario inputs. Including resistant fraction and residual
+doxycycline concentration in this layer allows their specified ranges to be
+examined but does not imply that they represent real-world variability. Paired
+Emax-EC50 values form the outer pharmacodynamic-uncertainty layer.
 
 ```{r model-parameters}
 alpha <- 0.60; beta <- 1.31e6; tfs <- 1; MIC <- 0.13
-fr_min <- 0; fr_max <- 0.5; pMIC_min <- 0; pMIC_max <- 10
-C_min <- 75; C_max <- 1100
-M_shape <- 0.8760928; M_scale <- 43.276368
-F_min <- 0.0018; F_max <- 0.0233
-
-n <- 15; Nu <- 100; Nc <- 100
-pawn_seed <- 0; ncores <- 4
+C_min <- 75; C_max <- 1100; M_shape <- 0.8760928; M_scale <- 43.276368
+F_min <- 0.0018; F_max <- 0.0233; fr_min <- 0; fr_max <- 0.5
+pMIC_min <- 0; pMIC_max <- 10
+n_outer <- 500; n <- 15; Nu <- 100; Nc <- 100
+seed <- 123; pawn_seed <- 0; ncores <- 4
 critval <- 1.36 * sqrt((Nu + Nc) / (Nu * Nc))
+stopifnot(Nu == Nc, Nu <= n_outer)
+
+exposure <- read.csv("raw_shrimp_mc2d_simulation_data.csv") |> arrange(inner_id)
+exposure_names <- c("C_retail", "M", "F_pathogenic")
+stopifnot(all(exposure_names %in% names(exposure)))
+variability_inner <- exposure[, exposure_names]; n_inner <- nrow(variability_inner)
 ```
 
-# Pharmacodynamic parameters
+# Pharmacodynamic uncertainty
 
-$E_{max}$ and $EC_{50}$ are sampled independently so that their effects can be
-evaluated separately by PAWN. Positive values are retained, and $E_{max}$ is
-converted from log10 per hour to natural-log per day for the SD-DRM.
+Emax and EC50 are sampled together from their fitted bivariate normal
+distribution, expressed in the units used by the SD-DRM. When either parameter
+is conditioned, the other is sampled from its conditional normal distribution
+so their fitted relationship is preserved.
 
-```{r pd-parameters}
-Emax_mean <- 1.476380; Emax_sd <- 0.10336972
-EC50_mean <- 0.166877; EC50_sd <- 0.04584022
+```{r pd-uncertainty}
+pd_estimates <- c(Emax_per_day = 81.5877739, EC50_ug_mL = 0.166877)
+pd_covariance <- matrix(c(32.631766203, 0.124149052, 0.124149052, 0.002101326), 2, 2,
+                        byrow = TRUE, dimnames = list(names(pd_estimates), names(pd_estimates)))
 
 rposnorm <- function(N, mean, sd) {
   x <- rnorm(N, mean, sd)
@@ -45,248 +59,297 @@ rposnorm <- function(N, mean, sd) {
   x
 }
 
-sample_Emax <- function(N) rposnorm(N, Emax_mean, Emax_sd) * 24 * log(10)
-sample_EC50 <- function(N) rposnorm(N, EC50_mean, EC50_sd)
+draw_pd <- function(N) {
+  x <- MASS::mvrnorm(N, pd_estimates, pd_covariance)
+  invalid <- x[, 1] <= 0 | x[, 2] <= 0
+  while (any(invalid)) {
+    x[invalid, ] <- MASS::mvrnorm(sum(invalid), pd_estimates, pd_covariance)
+    invalid <- x[, 1] <= 0 | x[, 2] <= 0
+  }
+  data.frame(Emax_per_day = x[, 1], EC50_ug_mL = x[, 2])
+}
+
+draw_conditional_pd <- function(N, condition_on, value) {
+  mu1 <- pd_estimates[1]; mu2 <- pd_estimates[2]
+  v1 <- pd_covariance[1, 1]; v2 <- pd_covariance[2, 2]; cv <- pd_covariance[1, 2]
+
+  if (condition_on == "Emax_per_day") {
+    Emax <- rep(value, N)
+    EC50 <- rposnorm(N, mu2 + cv / v1 * (value - mu1), sqrt(v2 - cv^2 / v1))
+  } else if (condition_on == "EC50_ug_mL") {
+    EC50 <- rep(value, N)
+    Emax <- rposnorm(N, mu1 + cv / v2 * (value - mu2), sqrt(v1 - cv^2 / v2))
+  } else stop("Unknown pharmacodynamic conditioning variable.")
+
+  data.frame(Emax_per_day = Emax, EC50_ug_mL = EC50)
+}
+
+set.seed(seed); pd_outer <- draw_pd(n_outer)
 ```
 
-# PAWN functions
+# PAWN design functions
 
-PAWN measures sensitivity using the maximum distance between the unconditional
-output distribution and output distributions obtained by conditioning each
-input. The SD-DRM lookup table is generated once from the sampled
-pharmacodynamic range and reused for all model evaluations.
+PAWN compares an unconditional output CDF with CDFs obtained by conditioning
+each input at 15 interior quantiles. Each condition-specific effect is measured
+using the two-sample Kolmogorov-Smirnov distance.
 
 ```{r pawn-functions}
-evaluate_model <- function(data, model, ab_lookup, ncores = 1) {
-  f <- function(i) model(data[i, , drop = FALSE], ab_lookup)
+pawn_probs <- (seq_len(n) - 0.5) / n
 
-  if (ncores > 1 && .Platform$OS.type != "windows") {
-    unlist(parallel::mclapply(
-      seq_len(nrow(data)), f,
-      mc.cores = ncores,
-      mc.set.seed = FALSE
-    ))
-  } else {
-    vapply(seq_len(nrow(data)), f, numeric(1))
+make_design <- function(sample_inputs, input_names, condition_values, seed) {
+  set.seed(seed); P <- length(input_names)
+  unconditional <- sample_inputs(Nu); conditional <- sample_inputs(P * n * Nc)
+  for (j in seq_len(P)) for (k in seq_len(n)) {
+    idx <- ((j - 1) * n * Nc + (k - 1) * Nc + 1):((j - 1) * n * Nc + k * Nc)
+    conditional[idx, input_names[j]] <- condition_values[[input_names[j]]][k]
   }
+  list(unconditional = unconditional, conditional = conditional,
+       input_names = input_names, condition_values = condition_values)
 }
 
-PAWN <- function(model, input_names, sample_inputs, Nu = 100, n = 15,
-                 Nc = 100, seed = 0, ncores = 1) {
-  set.seed(seed)
-  M <- length(input_names)
-  par_u <- sample_inputs(Nu)
-  par_c <- sample_inputs(M * n * Nc)
+make_pd_design <- function(unconditional_pd, seed) {
+  set.seed(seed); input_names <- c("Emax_per_day", "EC50_ug_mL")
+  unconditional <- unconditional_pd[seq_len(Nu), , drop = FALSE]
+  reference <- draw_pd(50000)
+  condition_values <- lapply(reference[, input_names, drop = FALSE], quantile,
+                             probs = pawn_probs, names = FALSE)
+  conditional <- map_dfr(input_names, function(input) {
+    map_dfr(condition_values[[input]], ~draw_conditional_pd(Nc, input, .x))
+  })
+  list(unconditional = unconditional, conditional = conditional,
+       input_names = input_names, condition_values = condition_values)
+}
 
-  for (j in seq_len(M)) {
-    for (i in seq_len(n)) {
-      idx <- ((j - 1) * n * Nc + (i - 1) * Nc + 1):
-        ((j - 1) * n * Nc + i * Nc)
-
-      par_c[idx, input_names[j]] <-
-        sample_inputs(1)[[input_names[j]]][1]
-    }
+calculate_ks <- function(y_u, y_c, input_names) {
+  KS <- matrix(NA_real_, length(input_names), n,
+               dimnames = list(input_names, paste0("Condition_", seq_len(n))))
+  for (j in seq_along(input_names)) for (k in seq_len(n)) {
+    idx <- ((j - 1) * n * Nc + (k - 1) * Nc + 1):((j - 1) * n * Nc + k * Nc)
+    KS[j, k] <- unname(suppressWarnings(ks.test(y_u, y_c[idx], exact = FALSE)$statistic))
   }
+  KS
+}
 
-  all_inputs <- rbind(par_u, par_c)
-
-  ab_lookup <- make_ab_lookup(
-    alpha, beta,
-    all_inputs$Emax,
-    all_inputs$EC50,
-    max(all_inputs$pMIC) / 100 * MIC,
-    tfs,
-    n_grid = 250,
-    seed = seed,
-    nsim = 1000
-  )
-
-  y_u <- evaluate_model(par_u, model, ab_lookup, ncores)
-  y_c <- evaluate_model(par_c, model, ab_lookup, ncores)
-  KS <- matrix(NA_real_, M, n, dimnames = list(input_names, NULL))
-
-  for (j in seq_len(M)) {
-    for (i in seq_len(n)) {
-      idx <- ((j - 1) * n * Nc + (i - 1) * Nc + 1):
-        ((j - 1) * n * Nc + i * Nc)
-
-      KS[j, i] <- unname(suppressWarnings(
-        ks.test(y_u, y_c[idx], exact = FALSE)$statistic
-      ))
-    }
-  }
-
-  list(KS = KS)
+parallel_lapply <- function(N, FUN) {
+  if (ncores > 1 && .Platform$OS.type != "windows")
+    parallel::mclapply(seq_len(N), FUN, mc.cores = ncores, mc.set.seed = FALSE)
+  else lapply(seq_len(N), FUN)
 }
 ```
 
-# SD-DRM sensitivity model
+# Input designs
 
-Retail concentration, serving mass, and pathogenic fraction represent
-variability only. The resulting PAWN indices therefore describe the influence
-of the complete exposure-input distributions.
+The exposure and scenario inputs use one common inner PAWN design. The scenario
+inputs are therefore treated like varying inputs computationally, while their
+scientific interpretation remains scenario-based. The same design is reused
+for all outer draws so differences are attributable to pharmacodynamic
+uncertainty rather than different random inner samples.
+
+```{r input-designs}
+sample_inner <- function(N) data.frame(
+  C_retail = runif(N, C_min, C_max),
+  M = rgamma(N, M_shape, scale = M_scale),
+  F_pathogenic = runif(N, F_min, F_max),
+  fr = runif(N, fr_min, fr_max),
+  pMIC = runif(N, pMIC_min, pMIC_max)
+)
+
+inner_conditions <- list(
+  C_retail = qunif(pawn_probs, C_min, C_max),
+  M = qgamma(pawn_probs, M_shape, scale = M_scale),
+  F_pathogenic = qunif(pawn_probs, F_min, F_max),
+  fr = qunif(pawn_probs, fr_min, fr_max),
+  pMIC = qunif(pawn_probs, pMIC_min, pMIC_max)
+)
+
+inner_names <- names(inner_conditions)
+inner_design <- make_design(sample_inner, inner_names, inner_conditions, pawn_seed)
+pd_design <- make_pd_design(pd_outer, pawn_seed + 1)
+
+set.seed(pawn_seed + 2)
+inner_reference <- transform(variability_inner,
+                             fr = runif(n_inner, fr_min, fr_max),
+                             pMIC = runif(n_inner, pMIC_min, pMIC_max))
+```
+
+# SD-DRM evaluation
+
+All model calculations remain on their original scales. The antibiotic lookup
+table covers every paired pharmacodynamic value required by the sensitivity
+analysis.
 
 ```{r sensitivity-model}
-rlogunif <- function(N, min, max) {
-  exp(runif(N, log(min), log(max)))
-}
+pd_lookup_values <- bind_rows(pd_outer, pd_design$unconditional, pd_design$conditional)
+ab_lookup <- make_ab_lookup(alpha = alpha, beta = beta,
+                            Emax = pd_lookup_values$Emax_per_day,
+                            EC50 = pd_lookup_values$EC50_ug_mL,
+                            C_max = pMIC_max / 100 * MIC, tfs = tfs,
+                            n_grid = 250, seed = pawn_seed, nsim = 1000)
 
-sample_inputs <- function(N) {
-  data.frame(
-    C_retail = rlogunif(N, C_min, C_max),
-    M = rgamma(N, shape = M_shape, scale = M_scale),
-    F_pathogenic = runif(N, F_min, F_max),
-    fr = runif(N, fr_min, fr_max),
-    pMIC = runif(N, pMIC_min, pMIC_max),
-    Emax = sample_Emax(N),
-    EC50 = sample_EC50(N)
-  )
-}
-
-risk_model <- function(x, ab_lookup) {
-  dose <- x$C_retail * x$M * x$F_pathogenic
-
+event_risk <- function(x, Emax, EC50) {
+  N <- nrow(x)
   calc_sd_drm(
-    dose,
-    x$fr,
-    x$pMIC / 100 * MIC,
-    alpha,
-    beta,
-    x$Emax,
-    x$EC50,
-    tfs,
-    ab_lookup
-  )$risk_total[1]
+    dose = x$C_retail * x$M * x$F_pathogenic, fr = x$fr,
+    C = x$pMIC / 100 * MIC, alpha = alpha, beta = beta,
+    Emax = rep(Emax, length.out = N), EC50 = rep(EC50, length.out = N),
+    tfs = tfs, ab_lookup = ab_lookup
+  )$risk_total
 }
-
-input_names <- c(
-  "C_retail", "M", "F_pathogenic",
-  "fr", "pMIC", "Emax", "EC50"
-)
-
-res <- PAWN(
-  risk_model,
-  input_names,
-  sample_inputs,
-  Nu,
-  n,
-  Nc,
-  pawn_seed,
-  ncores
-)
 ```
 
-# Sensitivity results and figure
+# Inner-layer sensitivity with propagated uncertainty
 
-The PAWN index is the Kolmogorov-Smirnov distance between unconditional and
-conditional output distributions. Higher values indicate a stronger influence
-on illness risk. The dashed line is a descriptive two-sample KS reference
-threshold, not a formal classification rule.
+For every paired outer Emax-EC50 draw, PAWN produces 15 KS distances for each
+inner input. At each conditioning value, the median across the 500 outer draws
+is retained. Consequently, every parameter contributes 15 plotted values,
+preserving its sensitivity pattern across the conditioning range while
+representing the typical effect across pharmacodynamic uncertainty.
+
+```{r inner-pawn}
+run_inner_outer <- function(u) {
+  Emax <- pd_outer$Emax_per_day[u]; EC50 <- pd_outer$EC50_ug_mL[u]
+  calculate_ks(event_risk(inner_design$unconditional, Emax, EC50),
+               event_risk(inner_design$conditional, Emax, EC50), inner_names)
+}
+
+inner_ks <- simplify2array(parallel_lapply(n_outer, run_inner_outer))
+dimnames(inner_ks) <- list(inner_names, paste0("Condition_", seq_len(n)),
+                           paste0("Outer_", seq_len(n_outer)))
+inner_condition_median <- apply(inner_ks, c(1, 2), median, na.rm = TRUE)
+inner_condition_lower <- apply(inner_ks, c(1, 2), quantile, 0.025, na.rm = TRUE)
+inner_condition_upper <- apply(inner_ks, c(1, 2), quantile, 0.975, na.rm = TRUE)
+```
+
+# Pharmacodynamic uncertainty sensitivity
+
+Emax and EC50 sensitivity is evaluated on expected illness risk after averaging
+over the same inner reference sample. The unconditional PAWN sample reuses the
+first 100 of the 500 propagated pairs; each conditional sample contains 100
+pairs and preserves the fitted Emax-EC50 dependence.
+
+```{r uncertainty-pawn}
+evaluate_pd <- function(data) unlist(parallel_lapply(nrow(data), function(i) {
+  mean(event_risk(inner_reference, data$Emax_per_day[i], data$EC50_ug_mL[i]))
+}), use.names = FALSE)
+
+pd_ks <- calculate_ks(evaluate_pd(pd_design$unconditional),
+                      evaluate_pd(pd_design$conditional), pd_design$input_names)
+```
+
+# Sensitivity summaries
+
+For each parameter, the median across its 15 condition-specific KS distances is
+the PAWN index. The remaining statistics describe how sensitivity changes
+across the conditioning range.
 
 ```{r pawn-summary}
-median_pawn <- apply(res$KS, 1, median)
+parameter_labels <- c(C_retail = "C_retail", M = "M", F_pathogenic = "F_pathogenic",
+                      fr = "f_r", pMIC = "pMIC", Emax_per_day = "Emax", EC50_ug_mL = "EC50")
+component_map <- c(C_retail = "Exposure variability", M = "Exposure variability",
+                   F_pathogenic = "Exposure variability", fr = "Scenario inputs",
+                   pMIC = "Scenario inputs", Emax_per_day = "Pharmacodynamic uncertainty",
+                   EC50_ug_mL = "Pharmacodynamic uncertainty")
 
-summary_pawn <- data.frame(
-  Parameter = c(
-    "C_retail", "M", "F_pathogenic",
-    "f_r", "pMIC", "Emax", "EC50"
-  ),
-  Rank = rank(-median_pawn, ties.method = "min"),
-  Median_PAWN = median_pawn,
-  Min_PAWN = apply(res$KS, 1, min),
-  Max_PAWN = apply(res$KS, 1, max),
-  Median_vs_threshold = ifelse(
-    median_pawn > critval,
-    "Median above threshold",
-    "Median below threshold"
+summarise_ks <- function(x) {
+  q <- t(apply(x, 1, quantile, c(0.025, 0.25, 0.50, 0.75, 0.975), na.rm = TRUE))
+  data.frame(
+    Component = unname(component_map[rownames(x)]),
+    Parameter = unname(parameter_labels[rownames(x)]),
+    Mean_KS = rowMeans(x, na.rm = TRUE), P2.5_KS = q[, 1], P25_KS = q[, 2],
+    Median_PAWN = q[, 3], P75_KS = q[, 4], P97.5_KS = q[, 5],
+    Minimum_KS = apply(x, 1, min, na.rm = TRUE), Maximum_KS = apply(x, 1, max, na.rm = TRUE)
   )
-)
-
-summary_pawn <- summary_pawn[order(summary_pawn$Rank), ]
-
-knitr::kable(
-  summary_pawn,
-  digits = 3,
-  caption = "PAWN sensitivity indices"
-)
-```
-
-```{r pawn-figure, fig.width=8.5, fig.height=5, dpi=600, fig.path="images/PAWN_"}
-plot_pawn <- function(res, labels) {
-  ord <- order(apply(res$KS, 1, median), decreasing = TRUE)
-  KS <- res$KS[ord, , drop = FALSE]
-  labels <- labels[ord]
-
-  boxplot(
-    t(KS),
-    ylim = c(0, 1),
-    outline = FALSE,
-    xaxt = "n",
-    xlab = "",
-    ylab = "PAWN index",
-    cex.axis = 1.1,
-    cex.lab = 1.2
-  )
-
-  axis(1, at = seq_along(labels), labels = FALSE)
-
-  text(
-    seq_along(labels),
-    -0.09,
-    labels,
-    srt = 40,
-    adj = 1,
-    xpd = TRUE,
-    cex = 0.95
-  )
-
-  points(
-    jitter(rep(seq_along(labels), n), factor = 1.5),
-    as.vector(KS),
-    pch = 21,
-    bg = "grey70"
-  )
-
-  abline(h = critval, lty = 2)
 }
 
-labels <- expression(
-  C[retail], M, F[pathogenic],
-  f[r], "pMIC", E[max], EC[50]
+condition_matrix <- rbind(inner_condition_median, pd_ks)
+pawn_summary <- summarise_ks(condition_matrix) |>
+  mutate(Rank = rank(-Median_PAWN, ties.method = "min")) |>
+  select(Component, Parameter, Rank, everything())
+
+make_condition_table <- function(parameter, matrix, lower = NULL, upper = NULL,
+                                 values, basis) data.frame(
+  Component = unname(component_map[parameter]), Parameter = unname(parameter_labels[parameter]),
+  Condition = seq_len(n), Conditioning_quantile = pawn_probs,
+  Conditioning_value = values[[parameter]], Median_KS = matrix[parameter, ],
+  P2.5_outer_KS = if (is.null(lower)) NA_real_ else lower[parameter, ],
+  P97.5_outer_KS = if (is.null(upper)) NA_real_ else upper[parameter, ], Basis = basis
 )
 
-set.seed(pawn_seed)
-par(mar = c(5.5, 4.2, 1, 1))
-plot_pawn(res, labels)
+condition_summary <- bind_rows(
+  map_dfr(inner_names, make_condition_table, matrix = inner_condition_median,
+          lower = inner_condition_lower, upper = inner_condition_upper,
+          values = inner_design$condition_values,
+          basis = "Median and 95% range across paired PD outer draws"),
+  map_dfr(pd_design$input_names, make_condition_table, matrix = pd_ks,
+          values = pd_design$condition_values,
+          basis = "KS distance after averaging over the inner reference sample")
+)
+
+dir.create("results", showWarnings = FALSE)
+write.csv(pawn_summary, file.path("results", "pawn_2d_illness_risk_summary.csv"), row.names = FALSE)
+write.csv(condition_summary, file.path("results", "pawn_condition_specific_ks.csv"), row.names = FALSE)
+knitr::kable(pawn_summary, digits = 3,
+             caption = "Two-dimensional PAWN sensitivity summary for illness risk")
+```
+
+# Sensitivity figure
+
+The single figure retains three panels for scientific interpretation. Each
+point is one of the 15 condition-specific KS distances and the box median is
+the PAWN index. Whiskers show the complete conditioning range. 
+
+```{r pawn-figure, include=FALSE}
+matrix_to_long <- function(x) as.data.frame(as.table(x), responseName = "KS") |>
+  transmute(Component = unname(component_map[as.character(Var1)]),
+            Parameter = unname(parameter_labels[as.character(Var1)]), KS)
+
+component_levels <- c("Exposure variability", "Scenario inputs", "Pharmacodynamic uncertainty")
+parameter_levels <- pawn_summary |>
+  mutate(Component = factor(Component, component_levels)) |>
+  arrange(Component, Rank) |> pull(Parameter)
+
+plot_data <- matrix_to_long(condition_matrix) |>
+  mutate(Component = factor(Component, component_levels),
+         Parameter = factor(Parameter, parameter_levels))
+
+pawn_plot <- ggplot(plot_data, aes(Parameter, KS)) +
+  geom_boxplot(width = 0.55, coef = Inf, outlier.shape = NA, fill = "grey80") +
+  geom_jitter(width = 0.10, height = 0, alpha = 0.45, size = 1.2) +
+  geom_hline(yintercept = critval, linetype = "dashed", linewidth = 0.45) +
+  scale_x_discrete(labels = c(
+    C_retail = expression(C[retail]), M = expression(M),
+    F_pathogenic = expression(F[pathogenic]), f_r = expression(f[r]),
+    pMIC = expression(pMIC), Emax = expression(E[max]), EC50 = expression(EC[50])
+  )) +
+  facet_grid(. ~ Component, scales = "free_x", space = "free_x") +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(x = NULL, y = "PAWN index",
+       caption = paste("The dashed line indicates the Kolmogorov–Smirnov (KS) threshold used in the PAWN analysis.")) +
+  theme_bw(base_size = 12) +
+  theme(axis.title.y = element_text(size = 14), axis.text = element_text(size = 11),
+        strip.text = element_text(face = "bold", size = 13),
+        plot.caption = element_text(size = 10.5, hjust = 1), panel.grid.minor = element_blank())
+
+figure_file <- file.path("images", "pawn_2d_illness_risk.png")
+dir.create(dirname(figure_file), recursive = TRUE, showWarnings = FALSE)
+ggsave(figure_file, pawn_plot, width = 12, height = 5.5, dpi = 600, bg = "white")
+```
+
+```{r display-pawn-figure, echo=FALSE, out.width="100%"}
+knitr::include_graphics(figure_file)
 ```
 
 # Analysis settings
 
 ```{r analysis-settings}
 settings <- data.frame(
-  Setting = c(
-    "Conditioning values",
-    "Unconditional samples",
-    "Conditional samples",
-    "KS reference value",
-    "Exposure inputs",
-    "Emax-EC50 dependence"
-  ),
-  Value = c(
-    n,
-    Nu,
-    Nc,
-    round(critval, 4),
-    paste(
-      "C_retail, M, and F_pathogenic:",
-      "variability only"
-    ),
-    "Independent"
-  )
+  Setting = c("Inner reference observations", "Outer PD simulations", "Conditioning values",
+              "PAWN unconditional outputs", "Conditional outputs per condition", "KS reference value",
+              "Exposure-variability inputs", "Scenario-range inputs",
+              "Outer uncertainty inputs", "Emax-EC50 dependence", "Sensitivity output"),
+  Value = c(n_inner, n_outer, n, Nu, Nc, round(critval, 4),
+            "C_retail, M, and F_pathogenic", "f_r and pMIC",
+            "Emax and EC50", "Preserved by paired and conditional sampling", "Illness risk")
 )
-
-knitr::kable(
-  settings,
-  caption = "PAWN sensitivity analysis settings"
-)
+knitr::kable(settings, caption = "Two-dimensional PAWN sensitivity-analysis settings")
 ```

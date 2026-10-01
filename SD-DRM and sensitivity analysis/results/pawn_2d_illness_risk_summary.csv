@@ -1,0 +1,8 @@
+"Component","Parameter","Rank","Mean_KS","P2.5_KS","P25_KS","Median_PAWN","P75_KS","P97.5_KS","Minimum_KS","Maximum_KS"
+"Exposure variability","C_retail",3,0.184,0.09,0.13,0.18,0.19,0.3785,0.09,0.41
+"Exposure variability","M",2,0.357333333333334,0.187,0.215,0.33,0.42,0.7435,0.18,0.81
+"Exposure variability","F_pathogenic",3,0.195333333333333,0.0935,0.145,0.18,0.245,0.361,0.09,0.41
+"Scenario inputs","f_r",5,0.170666666666667,0.0935,0.105,0.16,0.21,0.3575,0.09,0.41
+"Scenario inputs","pMIC",5,0.171333333333333,0.0935,0.13,0.16,0.195,0.331,0.09,0.38
+"Pharmacodynamic uncertainty","Emax",7,0.139333333333333,0.07,0.095,0.14,0.175,0.2325,0.07,0.25
+"Pharmacodynamic uncertainty","EC50",1,0.580666666666667,0.327,0.41,0.55,0.715,0.921500000000001,0.32,0.960000000000001
