@@ -114,7 +114,11 @@ write.csv(
 
 # Plotting data
 plot_data <- data.frame(Log10_dose = simulation_data$Log10_D_raw)
-median_log10_dose <- median(plot_data$Log10_dose, na.rm = TRUE)
+
+q_dose <- quantile(plot_data$Log10_dose, probs = c(0.025, 0.50, 0.975), na.rm = TRUE)
+p2.5_log10_dose <- q_dose[1]
+median_log10_dose <- q_dose[2]
+p97.5_log10_dose <- q_dose[3]
 
 plot_style <- theme_classic(base_size = 12) +
   theme(
@@ -124,43 +128,35 @@ plot_style <- theme_classic(base_size = 12) +
 
 # Histogram
 dose_plot <- ggplot(plot_data, aes(x = Log10_dose)) +
+  annotate(
+    "rect",
+    xmin = p2.5_log10_dose,
+    xmax = p97.5_log10_dose,
+    ymin = -Inf, ymax = Inf,
+    fill = "#BBD1E3",
+    alpha = 0.9
+  ) +
   geom_histogram(
-    binwidth = 0.10, boundary = 0,
-    colour = "black", fill = "grey70"
+    binwidth = 0.10,
+    boundary = 0,
+    colour = "black",
+    fill = "#7898B0",
+    alpha = 0.65
+  ) +
+  geom_vline(
+    xintercept = c(p2.5_log10_dose, p97.5_log10_dose),
+    linetype = "dashed",
+    colour = "#2C5D8A",
+    linewidth = 0.8
+  ) +
+  geom_vline(
+    xintercept = median_log10_dose,
+    colour = "black",
+    linewidth = 0.9
   ) +
   labs(
     x = expression(Log[10] * " pathogenic dose (MPN per shrimp-consumption day)"),
     y = "Frequency"
-  ) +
-  plot_style
-
-# Empirical cumulative distribution function
-cdf_plot <- ggplot(plot_data, aes(x = Log10_dose)) +
-  stat_ecdf(geom = "step", colour = "black", linewidth = 0.8, pad = TRUE) +
-  annotate(
-    "segment", x = -Inf, xend = median_log10_dose,
-    y = 0.50, yend = 0.50,
-    linetype = "dashed", colour = "grey30", linewidth = 0.6
-  ) +
-  annotate(
-    "segment", x = median_log10_dose, xend = median_log10_dose,
-    y = 0, yend = 0.50,
-    linetype = "dashed", colour = "grey30", linewidth = 0.6
-  ) +
-  annotate(
-    "label", x = median_log10_dose, y = 0.50,
-    label = sprintf("Median = %.3f", median_log10_dose),,
-    hjust = -0.1, vjust = 1.3, size = 3.5
-  ) +
-  scale_y_continuous(
-    breaks = seq(0, 1, 0.2),
-    labels = scales::percent_format(accuracy = 1),
-    limits = c(0, 1),
-    expand = expansion(mult = 0)
-  ) +
-  labs(
-    x = expression(Log[10] * " pathogenic dose (MPN per shrimp-consumption day)"),
-    y = "Cumulative probability"
   ) +
   plot_style
 
@@ -170,7 +166,6 @@ combined_dose_plot <- dose_plot + cdf_plot +
   plot_annotation(tag_levels = "A")
 
 print(combined_dose_plot)
-
 ggsave(
   "dose_variability_histogram_cdf_mc2d.png",
   combined_dose_plot,
