@@ -11,8 +11,6 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
-rm(list = ls())
-
 library(dplyr)
 library(tidyr)
 library(purrr)
@@ -21,22 +19,16 @@ library(ggplot2)
 source("model_functions.R")
 
 seed <- 123
-set.seed(seed)
 ```
 
 # Exposure data and model parameters
-
-The exposure file contains 1,000 variability draws, each representing the dose
-for a simulated shrimp-consumption day. The same dose vector is evaluated under
-500 paired pharmacodynamic uncertainty draws. In the resulting risk matrix,
-rows represent shrimp-consumption days and columns represent uncertainty draws.
 
 ```{r data-parameters}
 exposure <- read.csv("raw_shrimp_mc2d_simulation_data.csv") |>
   arrange(inner_id)
 
 n_inner <- nrow(exposure)
-n_outer <- 500 
+n_outer <- 500
 
 dose_inner <- exposure$D_raw
 dose <- rep(dose_inner, times = n_outer)
@@ -60,21 +52,19 @@ fr_seq <- seq(0, 0.5, by = 0.025)
 fr_plot <- c(0, 0.2, 0.5)
 fr_breaks <- seq(0, 0.5, by = 0.05)
 
-
 pMIC_colours <- c("0% MIC" = "#F8766D", "2% MIC" = "#00BFC4", "5% MIC" = "#C77CFF")
 fr_colours <- c("fr = 0" = "#F8766D", "fr = 0.2" = "#7CAE00", "fr = 0.5" = "#C77CFF")
 ```
 
 # Pharmacodynamic uncertainty
 
-The Emax and EC50 estimates are sampled together from their fitted bivariate
-normal distribution, expressed in the units used by the SD-DRM. Sampling them
-as pairs preserves their estimated relationship.
-
 ```{r pd-uncertainty}
 pd_estimates <- c(Emax_per_day = 81.587790, EC50_ug_mL = 0.166877)
 
-pd_covariance <- matrix(c(32.631766, 0.124149033, 0.124149033, 0.002101326), nrow = 2, byrow = TRUE)
+pd_covariance <- matrix(
+  c(32.631766, 0.124149033, 0.124149033, 0.002101326),
+  nrow = 2, byrow = TRUE
+)
 
 draw_pd <- function(n) {
   x <- MASS::mvrnorm(n, pd_estimates, pd_covariance)
@@ -93,7 +83,6 @@ pd <- draw_pd(n_outer)
 Emax_outer <- pd$Emax_per_day
 EC50_outer <- pd$EC50_ug_mL
 
-# Descriptive summary
 summarise_pd <- function(x) {
   q <- quantile(x, c(0.025, 0.25, 0.50, 0.75, 0.975), na.rm = TRUE, names = FALSE)
   data.frame(Mean = mean(x, na.rm = TRUE), P2.5 = q[1], P25 = q[2], Median = q[3],
@@ -116,16 +105,6 @@ write.csv(pd_summary, file.path("results", "pd_uncertainty_summary.csv"), row.na
 ```
 
 # SD-DRM simulation
-
-The original beta-Poisson alpha and beta describe the response without an
-antibiotic effect. They can therefore be used directly for the resistant
-subpopulation, but not for susceptible bacteria exposed to doxycycline.
-`make_ab_lookup()` generates r values from the original beta-Poisson model,
-adjusts them using the doxycycline concentration and paired Emax-EC50 draws,
-and obtains the adjusted alpha and beta for the susceptible subpopulation.
-`calc_sd_drm()` then splits the dose into susceptible and resistant components
-and combines their extinction probabilities to calculate the total illness
-risk.
 
 ```{r scenario-functions}
 ab_lookup <- make_ab_lookup(
@@ -159,6 +138,30 @@ run_scenario <- function(fr, pMIC) {
   )
 }
 
+# Rows are variability draws; columns are uncertainty draws.
+# Compute variability percentiles first, then uncertainty intervals.
+summarise_variability_uncertainty <- function(risk_matrix) {
+  variability_probs <- c(0.025, 0.25, 0.50, 0.75, 0.975)
+  variability_quantiles <- apply(
+    risk_matrix, 2, quantile,
+    probs = variability_probs, names = FALSE, type = 7
+  )
+  variability_statistics <- rbind(Mean = colMeans(risk_matrix),
+                                  variability_quantiles)
+  uncertainty_quantiles <- t(apply(
+    variability_statistics, 1, quantile,
+    probs = c(0.025, 0.50, 0.975), names = FALSE, type = 7
+  ))
+  # Summarise on the original scale before log10 transformation.
+  data.frame(
+    Variability_statistic = c("Mean", "P2.5", "P25", "P50", "P75", "P97.5"),
+    Mean_across_uncertainty_log10_risk = log10(rowMeans(variability_statistics)),
+    Median_across_uncertainty_log10_risk = log10(uncertainty_quantiles[, 2]),
+    P2.5_across_uncertainty_log10_risk = log10(uncertainty_quantiles[, 1]),
+    P97.5_across_uncertainty_log10_risk = log10(uncertainty_quantiles[, 3])
+  )
+}
+
 summarise_risk <- function(vary_by, values,
                            fixed_fr = NULL, fixed_pMIC = NULL) {
   map_dfr(values, function(value) {
@@ -187,13 +190,14 @@ summarise_risk <- function(vary_by, values,
 
     data.frame(
       value = value,
+      variability_summary = I(list(summarise_variability_uncertainty(x$risk))),
 
-      # Original-scale values retained for plotting
+      # Original-scale quantiles for plotting
       lower95_expected_risk = q_original[1],
       median_expected_risk = q_original[2],
       upper95_expected_risk = q_original[3],
 
-      # Log10 values retained for the CSV summary
+      # Log10 summaries for CSV output
       Mean_log10_expected_risk = mean(log10_expected_risk),
       P2.5_log10_expected_risk = q_log10[1],
       P25_log10_expected_risk = q_log10[2],
@@ -213,6 +217,7 @@ summarise_risk <- function(vary_by, values,
   })
 }
 
+# Locate the majority-classification boundary (the proportion is a step function).
 find_cutoff <- function(data, vary_by, fixed_fr = NULL, fixed_pMIC = NULL,
                         tolerance = 0.0001) {
   data <- arrange(data, value)
@@ -220,27 +225,30 @@ find_cutoff <- function(data, vary_by, fixed_fr = NULL, fixed_pMIC = NULL,
   i <- which(head(above, -1) & !tail(above, -1))[1]
   if (is.na(i)) return(NA_real_)
 
-  uniroot(
-    function(value) {
-      summarise_risk(vary_by, value, fixed_fr, fixed_pMIC)$prop_more_likely_treatable - 0.5
-    },
-    interval = data$value[c(i, i + 1)],
-    tol = tolerance
-  )$root
+  lower <- data$value[i]
+  upper <- data$value[i + 1]
+  while (upper - lower > tolerance) {
+    midpoint <- (lower + upper) / 2
+    more <- summarise_risk(vary_by, midpoint, fixed_fr, fixed_pMIC)$prop_more_likely_treatable > 0.5
+    if (more) lower <- midpoint else upper <- midpoint
+  }
+  (lower + upper) / 2
 }
 ```
 
 # Dose-response curves
 
-These curves use a fixed dose grid, so they show dose-response uncertainty from
-the paired Emax-EC50 draws without exposure variability. Dose and illness
-probability are transformed to log10 for plotting, while the SD-DRM calculations
-remain on their original scales.
-
 ```{r dose-response-functions}
 dose_grid <- 10^seq(log10(min(dose)), log10(max(dose)), length.out = 300)
 
 point_id <- unique(round(seq(1, length(dose_grid), length.out = 10)))
+dose_reference_lines <- data.frame(
+  log10_dose = log10(dose_percentiles),
+  reference = factor(
+    c("95% dose variability", "Median dose", "95% dose variability"),
+    levels = c("Median dose", "95% dose variability")
+  )
+)
 
 run_dose_grid <- function(fr, pMIC) {
   out <- calc_sd_drm(
@@ -265,17 +273,17 @@ run_dose_grid <- function(fr, pMIC) {
 make_dose_response <- function(vary_by, values, panel_values) {
   expand_grid(panel_value = panel_values, value = values) |>
     pmap_dfr(function(panel_value, value) {
-    if (vary_by == "pMIC") {
-  pMIC <- value
-  fr <- panel_value
-  panel <- paste0("Resistant fraction (fᵣ) = ", panel_value)
-  group <- paste0(value, "% MIC")
-} else {
-  fr <- value
-  pMIC <- panel_value
-  panel <- paste0("pMIC = ", panel_value, "% MIC")
-  group <- paste0("fr = ", value)
-}
+      if (vary_by == "pMIC") {
+        pMIC <- value
+        fr <- panel_value
+        panel <- paste0("Resistant fraction (fᵣ) = ", panel_value)
+        group <- paste0(value, "% MIC")
+      } else {
+        fr <- value
+        pMIC <- panel_value
+        panel <- paste0("pMIC = ", panel_value, "% MIC")
+        group <- paste0("fr = ", value)
+      }
 
       out <- run_dose_grid(fr, pMIC)
       q <- apply(out$risk, 2, quantile, probs = c(0.025, 0.50, 0.975), names = FALSE)
@@ -287,17 +295,11 @@ make_dose_response <- function(vary_by, values, panel_values) {
         upper95 = q[3, ],
         group = group,
         panel = panel,
-        status = apply(out$status, 2, function(x) names(which.max(table(x)))),
+        status = apply(out$delta, 2, function(x)
+          ifelse(mean(x > 0) > 0.5, "More likely treatable", "Less likely treatable")),
         show_point = seq_along(dose_grid) %in% point_id
       )
     })
-}
-
-make_pairwise_data <- function(data, comparisons) {
-  imap_dfr(comparisons, function(groups, comparison_name) {
-    filter(data, group %in% groups) |>
-      mutate(comparison = comparison_name)
-  })
 }
 
 save_plot <- function(plot, file, width, height) {
@@ -309,23 +311,12 @@ save_plot <- function(plot, file, width, height) {
 plot_dose_response_2d <- function(
     data, title, group_title, colours, file_name
 ) {
-  stopifnot(all(data$dose > 0, data$lower95 > 0,
-                data$median_risk > 0, data$upper95 > 0))
-
   data <- mutate(
     data,
     log10_dose = log10(dose),
     log10_lower95 = log10(lower95),
     log10_median_risk = log10(median_risk),
     log10_upper95 = log10(upper95)
-  )
-
-  dose_reference_lines <- data.frame(
-    log10_dose = log10(dose_percentiles),
-    reference = factor(
-      c("95% dose variability", "Median dose", "95% dose variability"),
-      levels = c("Median dose", "95% dose variability")
-    )
   )
 
   combined_legend_levels <- c(
@@ -349,7 +340,7 @@ plot_dose_response_2d <- function(
       aes(y = log10_median_risk, shape = status),
       size = 3.5
     ) +
-    facet_grid(comparison ~ panel) +
+    facet_wrap(~panel, nrow = 1) +
     scale_x_continuous(breaks = scales::breaks_pretty(n = 6)) +
     scale_y_continuous(breaks = scales::breaks_pretty(n = 6)) +
     scale_colour_manual(
@@ -427,7 +418,7 @@ plot_dose_response_2d <- function(
       legend.spacing.y = grid::unit(0.05, "cm")
     )
 
-  save_plot(p, file_name, width = 12, height = 9)
+  save_plot(p, file_name, width = 12, height = 5.5)
 }
 ```
 
@@ -436,16 +427,8 @@ plot_dose_response_2d <- function(
 ```{r dose-response-pmic}
 dose_response_pMIC <- make_dose_response("pMIC", pMIC_plot, panel_values = c(0, fr_fixed))
 
-pMIC_comparisons <- make_pairwise_data(
-  dose_response_pMIC,
-  list(
-    "0% MIC versus 2% MIC" = c("0% MIC", "2% MIC"),
-    "0% MIC versus 5% MIC" = c("0% MIC", "5% MIC")
-  )
-)
-
 plot_dose_response_2d(
-  pMIC_comparisons,
+  dose_response_pMIC,
   title = NULL,
   group_title = "Residual doxycycline concentration (pMIC)",
   colours = pMIC_colours,
@@ -458,16 +441,8 @@ plot_dose_response_2d(
 ```{r dose-response-fr}
 dose_response_fr <- make_dose_response("fr", fr_plot, panel_values = c(0, pMIC_fixed))
 
-fr_comparisons <- make_pairwise_data(
-  dose_response_fr,
-  list(
-    "fr = 0 versus fr = 0.2" = c("fr = 0", "fr = 0.2"),
-    "fr = 0 versus fr = 0.5" = c("fr = 0", "fr = 0.5")
-  )
-)
-
 plot_dose_response_2d(
-  fr_comparisons,
+  dose_response_fr,
   title = NULL,
   group_title = "Resistant fraction",
   colours = fr_colours,
@@ -477,17 +452,17 @@ plot_dose_response_2d(
 
 # Dose-response summary at the median exposure dose
 
-For each scenario shown in the two dose-response figures, illness risk is
-summarized at the median exposure dose across the paired Emax-EC50 uncertainty
-draws. The dose and illness-risk summaries are reported on the log10 scale.
-
 ```{r dose-response-median-summary}
-summarise_risk_at_dose <- function(fr, pMIC) {
-  out <- calc_sd_drm(
+run_median_dose <- function(fr, pMIC) {
+  calc_sd_drm(
     dose = rep(median_dose, n_outer), fr = fr, C = pMIC / 100 * MIC,
     alpha = alpha, beta = beta, Emax = Emax_outer, EC50 = EC50_outer,
     tfs = tfs, ab_lookup = ab_lookup
   )
+}
+
+summarise_risk_at_dose <- function(fr, pMIC) {
+  out <- run_median_dose(fr, pMIC)
 
   x <- log10(pmax(out$risk_total, .Machine$double.xmin))
   q <- quantile(x, c(0.025, 0.25, 0.50, 0.75, 0.975), names = FALSE)
@@ -506,6 +481,7 @@ summarise_risk_at_dose <- function(fr, pMIC) {
 
 dose_response_summary_pMIC <- expand_grid(fr = c(0, fr_fixed), pMIC = pMIC_plot) |>
   pmap_dfr(function(fr, pMIC) summarise_risk_at_dose(fr, pMIC)) |>
+  bind_rows(summarise_risk_at_dose(fr = 0.5, pMIC = 5)) |>
   mutate(Panel = paste0("Resistant fraction = ", fr),
          Scenario = paste0(pMIC, "% MIC")) |>
   select(Panel, Scenario, everything())
@@ -523,21 +499,12 @@ dose_response_summary_table <- bind_rows(
 )
 
 print(dose_response_summary_table)
-dir.create("results", showWarnings = FALSE)
 write.csv(dose_response_summary_table,
           file.path("results", "dose_response_at_median_dose_summary.csv"),
           row.names = FALSE)
 ```
 
-# illness risk
-
-For each uncertainty draw, the mean across shrimp-consumption days gives the
-illness risk. The median and 95% interval across the outer draws then
-describe uncertainty in that expected risk. The treatment outcome is classified
-within each uncertainty draw using the mean Delta P_treat across consumption
-days. The treatment cut-point is where the proportion of uncertainty draws
-classified as more likely treatable falls to 0.5. Expected-risk values are
-transformed to log10 for plotting and tabular export.
+# Expected illness risk
 
 ```{r expected-risk}
 add_cutoff_row <- function(data, vary_by, cutoff,
@@ -559,11 +526,9 @@ risk_limits_log10 <- function(...) {
     na.rm = TRUE
   )
 
-  stopifnot(limits[1] > 0)
   log10(limits)
 }
 
-# Four scenarios: two combined conditions and two reference conditions
 risk_summary_pMIC <- summarise_risk("pMIC", pMIC_seq, fixed_fr = fr_fixed)
 risk_summary_fr <- summarise_risk("fr", fr_seq, fixed_pMIC = pMIC_fixed)
 risk_summary_pMIC_fr0 <- summarise_risk("pMIC", pMIC_seq, fixed_fr = 0)
@@ -597,8 +562,6 @@ risk_summary_fr_plot <- add_cutoff_row(
   fixed_pMIC = pMIC_fixed
 )
 
-risk_summary_pMIC_fr0_plot <- risk_summary_pMIC_fr0
-
 risk_summary_fr_pMIC0_plot <- add_cutoff_row(
   risk_summary_fr_pMIC0, "fr", cutoff_fr_pMIC0,
   fixed_pMIC = 0
@@ -610,7 +573,7 @@ expected_risk_limits_selected <- risk_limits_log10(
 )
 
 expected_risk_limits_reference <- risk_limits_log10(
-  risk_summary_pMIC_fr0_plot,
+  risk_summary_pMIC_fr0,
   risk_summary_fr_pMIC0_plot
 )
 
@@ -624,12 +587,6 @@ plot_expected_risk <- function(data, panel_label, fixed_text,
     "More likely treatable",
     "Treatment cut-point"
   )
-
-  stopifnot(all(
-    data$lower95_expected_risk > 0,
-    data$median_expected_risk > 0,
-    data$upper95_expected_risk > 0
-  ))
 
   data <- data |>
     mutate(
@@ -797,17 +754,16 @@ assemble_expected_risk <- function(left_plot, right_plot) {
   ) +
     patchwork::plot_annotation(
       title = NULL,
-     caption = expression(
-  "Lines show log"[10] * "-transformed median expected illness risk; ribbons show 95% uncertainty intervals from paired " *
-    E[max] * "-" * EC[50] * " draws."
-),
+      caption = expression(
+        "Lines show log"[10] * "-transformed median illness risk; shaded areas show 95% uncertainty intervals from paired " *
+          E[max] * "-" * EC[50] * " draws."
+      ),
       theme = theme(
         plot.caption = element_text(size = 11, hjust = 1)
       )
     )
 }
 
-# Combined-condition figure retained in the main manuscript
 plot_A <- plot_expected_risk(
   risk_summary_pMIC_plot,
   panel_label = "A",
@@ -839,9 +795,8 @@ save_plot(
   height = 5.5
 )
 
-# Reference-condition figure saved separately
 plot_reference_A <- plot_expected_risk(
-  risk_summary_pMIC_fr0_plot,
+  risk_summary_pMIC_fr0,
   panel_label = "A",
   fixed_text = "Resistant fraction (fᵣ) fixed at 0",
   x_title = "Residual doxycycline concentration (pMIC)",
@@ -871,82 +826,23 @@ save_plot(
   height = 5.5
 )
 
-# One CSV containing the four scenarios at labelled x-axis values
-format_expected_risk_export <- function(data, figure, panel,
-                                        fixed_condition, x_parameter,
-                                        selected_x_values) {
-  data |>
-    filter(
-      round(value, 6) %in%
-        round(selected_x_values, 6)
-    ) |>
-    transmute(
-      Figure = figure,
-      Panel = panel,
-      Fixed_condition = fixed_condition,
-      X_axis_parameter = x_parameter,
-      X_axis_value = value,
-      Treatment_outcome = outcome,
-      Mean_log10_expected_illness_risk = Mean_log10_expected_risk,
-      P2.5_log10_expected_illness_risk = P2.5_log10_expected_risk,
-      P25_log10_expected_illness_risk = P25_log10_expected_risk,
-      Median_log10_expected_illness_risk = Median_log10_expected_risk,
-      P75_log10_expected_illness_risk = P75_log10_expected_risk,
-      P97.5_log10_expected_illness_risk = P97.5_log10_expected_risk,
-      Minimum_log10_expected_illness_risk = Minimum_log10_expected_risk,
-      Maximum_log10_expected_illness_risk = Maximum_log10_expected_risk
-    )
-}
-
-expected_risk_four_scenarios_csv <- bind_rows(
-  format_expected_risk_export(
-    risk_summary_pMIC_fr0,
-    "Reference conditions", "A",
-    "Resistant fraction = 0",
-    "pMIC (% MIC)",
-    pMIC_breaks
-  ),
-  format_expected_risk_export(
-    risk_summary_fr_pMIC0,
-    "Reference conditions", "B",
-    "pMIC = 0% MIC",
-    "Resistant fraction",
-    fr_breaks
-  ),
-  format_expected_risk_export(
-    risk_summary_pMIC,
-    "Combined conditions", "A",
-    paste0("Resistant fraction = ", fr_fixed),
-    "pMIC (% MIC)",
-    pMIC_breaks
-  ),
-  format_expected_risk_export(
-    risk_summary_fr,
-    "Combined conditions", "B",
-    paste0("pMIC = ", pMIC_fixed, "% MIC"),
-    "Resistant fraction",
-    fr_breaks
-  )
-)
-
-print(expected_risk_four_scenarios_csv)
-dir.create("results", showWarnings = FALSE)
+illness_risk_csv <- tidyr::expand_grid(
+  fr = fr_seq,
+  pMIC = 0:10
+) |>
+  purrr::pmap_dfr(function(fr, pMIC) {
+    summarise_variability_uncertainty(run_scenario(fr, pMIC)$risk) |>
+      mutate(fr = fr, pMIC = pMIC, .before = 1)
+  })
 
 write.csv(
-  expected_risk_four_scenarios_csv,
-  file.path(
-    "results",
-    "expected_illness_risk_four_scenarios_log10.csv"
-  ),
+  illness_risk_csv,
+  file.path("results", "Ilness_risk_disribution.csv"),
   row.names = FALSE
 )
 ```
 
 # Illness-risk CDF
-
-Within each uncertainty draw, the empirical CDF describes variability among
-shrimp-consumption days. The median and pointwise 95% interval of these CDFs across
-the outer draws show uncertainty around the variability distribution.
 
 ```{r illness-risk-cdf}
 cdf_scenarios <- data.frame(
@@ -1024,9 +920,9 @@ overlap_note <- data.frame(
     "B. Baseline vs resistance only",
     levels = names(comparison_sets)
   ),
-  x = quantile(log_risk_grid, 0.25),
+  x = -6.5,
   y = 0.12,
-  label = "Curves overlap completely"
+  label = "Curve coincides with baseline"
 )
 
 illness_risk_cdf_comparisons <- ggplot(
@@ -1046,6 +942,8 @@ illness_risk_cdf_comparisons <- ggplot(
     size = 3.2
   ) +
   facet_wrap(~comparison, nrow = 1) +
+  coord_cartesian(xlim = c(-8, -2.5)) +
+  scale_x_continuous(breaks = seq(-8, -2.5, by = 1)) +
   scale_colour_manual(name = "Scenario", values = cdf_colours) +
   scale_fill_manual(name = "Scenario", values = cdf_colours) +
   scale_y_continuous(
@@ -1053,24 +951,24 @@ illness_risk_cdf_comparisons <- ggplot(
     breaks = seq(0, 1, by = 0.25)
   ) +
   labs(
-  title = NULL,
-  x = expression(log[10] * " illness probability per shrimp-consumption day"),
-  y = "Cumulative probability",
-  caption = paste(
-    "Lines show median variability CDFs; shaded areas show",
-    "pointwise 95% modelled uncertainty bands."
+    title = NULL,
+    x = expression(log[10] * " illness probability per shrimp-consumption day"),
+    y = "Cumulative probability",
+    caption = paste(
+      "Lines show median variability CDFs; shaded areas show",
+      "pointwise 95% modelled uncertainty bands."
+    )
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_blank(),
+    strip.text = element_text(face = "bold", size = 11.5),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11.5),
+    plot.caption = element_text(size = 13, hjust = 1),
+    legend.position = "bottom",
+    legend.box = "horizontal"
   )
-) +
-theme_classic(base_size = 12) +
-theme(
-  plot.title = element_blank(),
-  strip.text = element_text(face = "bold", size = 11.5),
-  legend.title = element_text(size = 13),
-  legend.text = element_text(size = 11.5),
-  plot.caption = element_text(size = 13, hjust = 1),
-  legend.position = "bottom",
-  legend.box = "horizontal"
-)
 
 save_plot(
   illness_risk_cdf_comparisons,
@@ -1082,15 +980,12 @@ save_plot(
 
 # Delta P_treat across the dose range
 
-This analysis uses the fixed dose grid from the conditional dose-response
-analysis. At each dose, Delta P_treat is calculated for the paired Emax-EC50
-uncertainty draws. Exposure variability is not included in these figures.
-Positive values indicate that a more-treatable outcome is more likely; values
-at or below zero indicate that a less-treatable outcome is more likely.
-
 ```{r delta-dose-functions}
 make_delta_curve <- function(fr, pMIC, group, panel) {
-  q <- apply(run_dose_grid(fr, pMIC)$delta, 2, quantile, probs = c(0.025, 0.50, 0.975), names = FALSE)
+  q <- apply(
+    run_dose_grid(fr, pMIC)$delta, 2, quantile,
+    probs = c(0.025, 0.50, 0.975), names = FALSE
+  )
 
   data.frame(
     dose = dose_grid,
@@ -1104,14 +999,6 @@ make_delta_curve <- function(fr, pMIC, group, panel) {
 
 plot_delta_curve <- function(data, title, legend_title, colours, file_name) {
   data <- mutate(data, log10_dose = log10(dose))
-
-  dose_reference_lines <- data.frame(
-    log10_dose = log10(dose_percentiles),
-    reference = factor(
-      c("95% dose variability", "Median dose", "95% dose variability"),
-      levels = c("Median dose", "95% dose variability")
-    )
-  )
 
   dose_reference_linetypes <- c(
     "Median dose" = "solid",
@@ -1156,7 +1043,7 @@ plot_delta_curve <- function(data, title, legend_title, colours, file_name) {
       ),
       y = expression(Delta * P[treat]),
       caption = expression(
-        "Curves show medians; ribbons show pointwise 95% uncertainty " *
+        "Curves show medians; shaded areas show pointwise 95% uncertainty " *
           "intervals from paired " * E[max] * "-" * EC[50] * " simulations."
       )
     ) +
@@ -1166,20 +1053,20 @@ plot_delta_curve <- function(data, title, legend_title, colours, file_name) {
       linetype = guide_legend(order = 2, nrow = 1)
     ) +
     theme_bw(base_size = 14) +
-theme(
-  plot.title = element_text(face = "bold", size = 18),
-  axis.title = element_text(size = 16),
-  axis.text = element_text(size = 13),
-  strip.text = element_text(face = "bold", size = 15),
-  legend.title = element_text(size = 14),
-  legend.text = element_text(size = 13),
-  plot.caption = element_text(size = 12),
-  panel.grid.minor = element_blank(),
-  legend.position = "top",
-  legend.box = "vertical",
-  legend.spacing.y = grid::unit(0.15, "cm"),
-  legend.key.width = grid::unit(1.1, "cm")
-)
+    theme(
+      plot.title = element_text(face = "bold", size = 18),
+      axis.title = element_text(size = 16),
+      axis.text = element_text(size = 13),
+      strip.text = element_text(face = "bold", size = 15),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 13),
+      plot.caption = element_text(size = 12),
+      panel.grid.minor = element_blank(),
+      legend.position = "top",
+      legend.box = "vertical",
+      legend.spacing.y = grid::unit(0.15, "cm"),
+      legend.key.width = grid::unit(1.1, "cm")
+    )
 
   save_plot(p, file_name, width = 12, height = 6.5)
 }
@@ -1227,19 +1114,9 @@ plot_delta_curve(
 
 # Delta P_treat summary at the median exposure dose
 
-For each scenario shown in the two conditional Delta P_treat figures, the
-distribution across the paired Emax-EC50 uncertainty draws is summarized at
-the median exposure dose. The treatment outcome is classified as more likely
-treatable when more than 50% of the uncertainty draws have a positive Delta
-P_treat value.
-
 ```{r delta-median-dose-summary}
 summarise_delta_at_dose <- function(fr, pMIC) {
-  out <- calc_sd_drm(
-    dose = rep(median_dose, n_outer), fr = fr, C = pMIC / 100 * MIC,
-    alpha = alpha, beta = beta, Emax = Emax_outer, EC50 = EC50_outer,
-    tfs = tfs, ab_lookup = ab_lookup
-  )
+  out <- run_median_dose(fr, pMIC)
 
   x <- out$delta_p_treat
   q <- quantile(x, c(0.025, 0.25, 0.50, 0.75, 0.975), names = FALSE)
@@ -1271,6 +1148,5 @@ delta_summary_table <- bind_rows(
 )
 
 print(delta_summary_table)
-dir.create("results", showWarnings = FALSE)
 write.csv(delta_summary_table, file.path("results", "delta_p_treat_at_median_dose_summary.csv"), row.names = FALSE)
 ```

@@ -79,17 +79,21 @@ summarise_risk <- function(vary_by, values, fixed_value) {
   })
 }
 
+# Locate the majority-classification boundary using bisection.
 find_cutoff <- function(data, vary_by, fixed_value, tolerance) {
   data <- arrange(data, value)
-  transition <- which(head(data$prop_more > 0.5, -1) &
-                        !tail(data$prop_more > 0.5, -1))[1]
-  if (is.na(transition)) return(NA_real_)
+  above <- data$prop_more > 0.5
+  i <- which(head(above, -1) & !tail(above, -1))[1]
+  if (is.na(i)) return(NA_real_)
   
-  uniroot(
-    function(value) summarise_risk(vary_by, value, fixed_value)$prop_more - 0.5,
-    interval = data$value[c(transition, transition + 1)],
-    tol = tolerance
-  )$root
+  lower <- data$value[i]
+  upper <- data$value[i + 1]
+  while (upper - lower > tolerance) {
+    midpoint <- (lower + upper) / 2
+    more <- summarise_risk(vary_by, midpoint, fixed_value)$prop_more > 0.5
+    if (more) lower <- midpoint else upper <- midpoint
+  }
+  (lower + upper) / 2
 }
 
 make_view_data <- function(vary_by, slices, grid) {
@@ -104,10 +108,10 @@ make_view_data <- function(vary_by, slices, grid) {
         hover = paste0(
           "Resistant fraction: ", sprintf("%.3f", fr),
           "<br>pMIC: ", sprintf("%.2f", pMIC), "% MIC",
-          "<br>Median log10 risk: ", sprintf("%.3f", log10_median),
-          "<br>95% interval: ", sprintf("%.3f", log10_lower95),
+          "<br>log10 median mean illness risk: ", sprintf("%.3f", log10_median),
+          "<br>95% uncertainty interval (log10): ", sprintf("%.3f", log10_lower95),
           " to ", sprintf("%.3f", log10_upper95),
-          "<br>Treatment outcome: ", outcome
+          "<br>Treatment classification: ", outcome
         )
       )
   })
@@ -196,7 +200,7 @@ add_view <- function(plot, data, cutoffs, x_name, slice_name,
       plot, x = mesh$x, y = mesh$y, z = mesh$z,
       i = mesh$i, j = mesh$j, k = mesh$k, type = "mesh3d",
       color = "#6BAED6", facecolor = rep("#6BAED6", length(mesh$i)),
-      opacity = 0.40, name = "95% uncertainty interval",
+      opacity = 0.40, name = "95% uncertainty interval for mean risk",
       legendrank = 4, showlegend = slice == slices[1],
       visible = visible, hoverinfo = "skip"
     )
@@ -263,7 +267,7 @@ z_limits <- range(z_ticks) + c(-0.05, 0.05)
 
 make_scene <- function(x_title, x_ticks, y_title, y_ticks, aspect, eye) {
   list(
-    xaxis = list(title = x_title, tickmode = "array", tickvals = x_ticks[x_ticks > 0],
+    xaxis = list(title = x_title, tickmode = "array", tickvals = x_ticks,
                  range = range(x_ticks)),
     yaxis = list(title = y_title, tickmode = "array", tickvals = y_ticks,
                  range = range(y_ticks)),
@@ -279,7 +283,7 @@ make_scene <- function(x_title, x_ticks, y_title, y_ticks, aspect, eye) {
 }
 
 scene_A <- make_scene(
-  "Residual doxycycline concentration (pMIC)", pMIC_slices,
+  "Residual doxycycline concentration (pMIC, % MIC)", pMIC_slices,
   "Resistant fraction (fᵣ)", fr_slices,
   list(x = 1.5, y = 0.9, z = 1),
   list(x = 1.5, y = -1.8, z = 1.1)
@@ -287,7 +291,7 @@ scene_A <- make_scene(
 
 scene_B <- make_scene(
   "Resistant fraction (fᵣ)", fr_slices,
-  "Residual doxycycline concentration (pMIC)", pMIC_slices,
+  "Residual doxycycline concentration (pMIC, % MIC)", pMIC_slices,
   list(x = 1.5, y = 1.1, z = 1),
   list(x = 1.9, y = -1.4, z = 1.1)
 )
