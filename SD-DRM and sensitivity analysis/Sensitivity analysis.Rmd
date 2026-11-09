@@ -30,7 +30,7 @@ critval <- 1.36 * sqrt((Nu + Nc) / (Nu * Nc))
 stopifnot(Nu == Nc, Nu <= n_outer)
 
 exposure <- read.csv("raw_shrimp_mc2d_simulation_data.csv") |> arrange(inner_id)
-exposure_names <- c("C_retail", "M", "F_pathogenic")
+exposure_names <- c("B_retail", "M", "F_pathogenic")
 stopifnot(all(exposure_names %in% names(exposure)))
 variability_inner <- exposure[, exposure_names]; n_inner <- nrow(variability_inner)
 ```
@@ -131,7 +131,7 @@ The same PAWN input design is reused across 500 pharmacodynamic draws.
 
 ```{r input-designs}
 sample_inner <- function(N) data.frame(
-  C_retail = runif(N, C_min, C_max),
+  B_retail = runif(N, C_min, C_max),
   M = rgamma(N, M_shape, scale = M_scale),
   F_pathogenic = runif(N, F_min, F_max),
   fr = runif(N, fr_min, fr_max),
@@ -139,7 +139,7 @@ sample_inner <- function(N) data.frame(
 )
 
 inner_conditions <- list(
-  C_retail = qunif(pawn_probs, C_min, C_max),
+  B_retail = qunif(pawn_probs, C_min, C_max),
   M = qgamma(pawn_probs, M_shape, scale = M_scale),
   F_pathogenic = qunif(pawn_probs, F_min, F_max),
   fr = qunif(pawn_probs, fr_min, fr_max),
@@ -171,7 +171,7 @@ ab_lookup <- make_ab_lookup(alpha = alpha, beta = beta,
 event_risk <- function(x, Emax, EC50) {
   N <- nrow(x)
   calc_sd_drm(
-    dose = x$C_retail * x$M * x$F_pathogenic, fr = x$fr,
+    dose = x$B_retail * x$M * x$F_pathogenic, fr = x$fr,
     C = x$pMIC / 100 * MIC, alpha = alpha, beta = beta,
     Emax = rep(Emax, length.out = N), EC50 = rep(EC50, length.out = N),
     tfs = tfs, ab_lookup = ab_lookup
@@ -216,9 +216,9 @@ pd_ks <- calculate_ks(evaluate_pd(pd_design$unconditional),
 PAWN indices are medians of the 15 condition-specific KS distances.
 
 ```{r pawn-summary}
-parameter_labels <- c(C_retail = "C_retail", M = "M", F_pathogenic = "F_pathogenic",
+parameter_labels <- c(B_retail = "B_retail", M = "M", F_pathogenic = "F_pathogenic",
                       fr = "f_r", pMIC = "pMIC", Emax_per_day = "Emax", EC50_ug_mL = "EC50")
-component_map <- c(C_retail = "Exposure variability", M = "Exposure variability",
+component_map <- c(B_retail = "Exposure variability", M = "Exposure variability",
                    F_pathogenic = "Exposure variability", fr = "Scenario inputs",
                    pMIC = "Scenario inputs", Emax_per_day = "Pharmacodynamic uncertainty",
                    EC50_ug_mL = "Pharmacodynamic uncertainty")
@@ -288,7 +288,7 @@ pawn_plot <- ggplot(plot_data, aes(Parameter, KS)) +
   geom_jitter(width = 0.10, height = 0, alpha = 0.45, size = 1.2) +
   geom_hline(yintercept = critval, linetype = "dashed", linewidth = 0.45) +
   scale_x_discrete(labels = c(
-    C_retail = expression(C[retail]), M = expression(M),
+    B_retail = expression(B[retail]), M = expression(M),
     F_pathogenic = expression(F[pathogenic]), f_r = expression(f[r]),
     pMIC = expression(pMIC), Emax = expression(E[max]), EC50 = expression(EC[50])
   )) +
@@ -319,7 +319,7 @@ settings <- data.frame(
               "Exposure-variability inputs", "Scenario-range inputs",
               "Outer uncertainty inputs", "Emax-EC50 dependence", "Sensitivity output"),
   Value = c(n_inner, n_outer, n, Nu, Nc, round(critval, 4),
-            "C_retail, M, and F_pathogenic", "f_r and pMIC",
+            "B_retail, M, and F_pathogenic", "f_r and pMIC",
             "Emax and EC50", "Preserved by paired and conditional sampling", "Illness risk")
 )
 knitr::kable(settings, caption = "Two-dimensional PAWN sensitivity-analysis settings")
