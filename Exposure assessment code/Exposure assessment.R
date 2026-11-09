@@ -14,8 +14,8 @@ ndvar(n_inner)
 ndunc(n_outer)
 
 # Input values
-C_min <- 75
-C_max <- 1100
+B_min <- 75
+B_max <- 1100
 
 M_shape <- 0.8760928
 M_scale <- 43.276368
@@ -24,15 +24,15 @@ F_min <- 0.0018
 F_max <- 0.0233
 
 # Input variability
-C_retail_v <- mcstoc(runif, type = "V", min = C_min, max = C_max)
+B_retail_v <- mcstoc(runif, type = "V", min = B_min, max = B_max)
 M_v <- mcstoc(rgamma, type = "V", shape = M_shape, scale = M_scale)
 F_pathogenic_v <- mcstoc(runif, type = "V", min = F_min, max = F_max)
 
 # Daily pathogenic dose
-D_raw_v <- C_retail_v * M_v * F_pathogenic_v
+D_raw_v <- B_retail_v * M_v * F_pathogenic_v
 
 # Model summary
-exposure_model <- mc(C_retail_v, M_v, F_pathogenic_v, D_raw_v)
+exposure_model <- mc(B_retail_v, M_v, F_pathogenic_v, D_raw_v)
 
 print(exposure_model)
 print(summary(exposure_model, probs = c(0.025, 0.50, 0.975)))
@@ -40,7 +40,7 @@ print(summary(exposure_model, probs = c(0.025, 0.50, 0.975)))
 # Extract variability simulations
 simulation_data <- data.frame(
   inner_id = seq_len(n_inner),
-  C_retail = as.vector(unmc(C_retail_v, drop = TRUE)),
+  B_retail = as.vector(unmc(B_retail_v, drop = TRUE)),
   M = as.vector(unmc(M_v, drop = TRUE)),
   F_pathogenic = as.vector(unmc(F_pathogenic_v, drop = TRUE)),
   D_raw = as.vector(unmc(D_raw_v, drop = TRUE))
@@ -78,7 +78,7 @@ summarise_parameter <- function(x) {
 }
 
 parameter_labels <- c(
-  C_retail = "Retail concentration (MPN/g)",
+  B_retail = "Retail concentration (MPN/g)",
   M = "Serving mass (g/shrimp-consumption day)",
   F_pathogenic = "Pathogenic fraction (proportion)",
   D_raw = "Pathogenic dose (MPN/shrimp-consumption day)",
