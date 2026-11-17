@@ -190,7 +190,7 @@ cdf_plot <- ggplot(plot_data, aes(x = Log10_dose)) +
     "label",
     x = median_log10_dose + 0.10,
     y = 0.47,
-    label = paste0("Median = ", round(median_log10_dose, 3)),
+    label = "Median = 2.12",
     hjust = 0,
     size = 3.5
   ) +
