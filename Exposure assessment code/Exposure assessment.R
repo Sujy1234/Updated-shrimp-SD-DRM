@@ -96,10 +96,8 @@ parameter_summary <- do.call(
 
 parameter_summary <- parameter_summary[
   ,
-  c(
-    "Parameter", "Mean", "P2.5", "P25", "Median",
-    "P75", "P97.5", "Minimum", "Maximum"
-  )
+  c("Parameter", "Mean", "P2.5", "P25", "Median",
+    "P75", "P97.5", "Minimum", "Maximum")
 ]
 
 rownames(parameter_summary) <- NULL
@@ -115,10 +113,15 @@ write.csv(
 # Plotting data
 plot_data <- data.frame(Log10_dose = simulation_data$Log10_D_raw)
 
-q_dose <- quantile(plot_data$Log10_dose, probs = c(0.025, 0.50, 0.975), na.rm = TRUE)
-p2.5_log10_dose <- q_dose[1]
-median_log10_dose <- q_dose[2]
-p97.5_log10_dose <- q_dose[3]
+q_dose <- quantile(
+  plot_data$Log10_dose,
+  probs = c(0.025, 0.50, 0.975),
+  na.rm = TRUE
+)
+
+p2.5_log10_dose <- unname(q_dose[1])
+median_log10_dose <- unname(q_dose[2])
+p97.5_log10_dose <- unname(q_dose[3])
 
 plot_style <- theme_classic(base_size = 12) +
   theme(
@@ -160,12 +163,55 @@ dose_plot <- ggplot(plot_data, aes(x = Log10_dose)) +
   ) +
   plot_style
 
+# Cumulative distribution function
+cdf_plot <- ggplot(plot_data, aes(x = Log10_dose)) +
+  stat_ecdf(
+    geom = "step",
+    linewidth = 0.9,
+    colour = "black"
+  ) +
+  annotate(
+    "segment",
+    x = -Inf, xend = median_log10_dose,
+    y = 0.5, yend = 0.5,
+    linetype = "dashed",
+    colour = "grey40",
+    linewidth = 0.6
+  ) +
+  annotate(
+    "segment",
+    x = median_log10_dose, xend = median_log10_dose,
+    y = 0, yend = 0.5,
+    linetype = "dashed",
+    colour = "grey40",
+    linewidth = 0.6
+  ) +
+  annotate(
+    "label",
+    x = median_log10_dose + 0.10,
+    y = 0.47,
+    label = paste0("Median = ", round(median_log10_dose, 3)),
+    hjust = 0,
+    size = 3.5
+  ) +
+  scale_y_continuous(
+    labels = scales::percent,
+    breaks = seq(0, 1, 0.2),
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x = expression(Log[10] * " pathogenic dose (MPN per shrimp-consumption day)"),
+    y = "Cumulative probability"
+  ) +
+  plot_style
 # Combine figures
 combined_dose_plot <- dose_plot + cdf_plot +
   plot_layout(ncol = 2) +
   plot_annotation(tag_levels = "A")
 
 print(combined_dose_plot)
+
 ggsave(
   "dose_variability_histogram_cdf_mc2d.png",
   combined_dose_plot,
